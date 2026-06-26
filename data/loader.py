@@ -8,14 +8,72 @@
 
 import numpy as np
 import pandas as pd
+import urllib.request
 from sklearn.datasets import load_wine
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.preprocessing import StandardScaler
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 import config
+
+
+def load_miniboone():
+    """
+    MiniBooNE Particle Identification — UCI repository
+    Task: classify particle events as electron neutrino (signal=1)
+          vs muon neutrino (background=0).
+
+    130,064 samples | 50 continuous kinematic features | binary classification
+
+    Physical context:
+        MiniBooNE is a neutrino oscillation experiment at Fermilab, Illinois.
+        A beam of muon neutrinos is fired at a tank of mineral oil. If a muon
+        neutrino oscillates into an electron neutrino during flight, it produces
+        a distinct Cherenkov light pattern — but the two signatures overlap.
+        These 50 features describe the reconstructed light patterns.
+
+    Why calibration matters here:
+        Miscounting electron neutrino events directly changes the physics
+        conclusion about neutrino oscillation parameters. A model that is 95%
+        confident but only 60% accurate in that bin would cause a false result.
+
+    Reference: MiniBooNE Collaboration (Fermilab, 2008)
+    UCI URL: https://archive.ics.uci.edu/ml/machine-learning-databases/00199/
+    """
+    url = ("https://archive.ics.uci.edu/ml/machine-learning-databases/"
+           "00199/MiniBooNE_PID.txt")
+    print("  Downloading MiniBooNE (~18 MB, one-time)...")
+
+    data_rows = []
+    n_signal = n_bg = 0
+
+    with urllib.request.urlopen(url) as f:
+        for i, raw_line in enumerate(f):
+            parts = raw_line.decode().strip().split()
+            if not parts:
+                continue
+            if i == 0:
+                # First line: "n_signal  n_background"
+                n_signal = int(parts[0])
+                n_bg     = int(parts[1])
+            else:
+                data_rows.append([float(v) for v in parts])
+
+    X = np.array(data_rows, dtype=np.float32)
+    y = np.array([1] * n_signal + [0] * n_bg, dtype=int)
+
+    # Drop any rows with NaN (rare but safe to check)
+    mask = ~np.isnan(X).any(axis=1)
+    X, y = X[mask], y[mask]
+
+    print(f"  Signal (νₑ): {n_signal:,}  |  Background (νμ): {n_bg:,}")
+
+    n_classes    = 2
+    name         = "MiniBooNE Particle Identification (Fermilab)"
+    feature_names = [f"F{i+1:02d}" for i in range(X.shape[1])]
+    return X, y, n_classes, name, feature_names
 
 
 def load_magic():
@@ -79,9 +137,10 @@ def load_wine_dataset():
 
 # ── Dataset registry ─────────────────────────────────────────────────────────
 DATASETS = {
-    "magic": load_magic,
-    "higgs": load_higgs,
-    "wine":  load_wine_dataset,
+    "miniboone": load_miniboone,
+    "magic":     load_magic,
+    "higgs":     load_higgs,
+    "wine":      load_wine_dataset,
 }
 
 

@@ -1,1 +1,1 @@
-from .transformer import TabTransformer
+from .transformer import FTTransformer

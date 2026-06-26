@@ -1,180 +1,249 @@
 # =============================================================================
-# main.py — Entry point: runs the full experiment end-to-end
+# main.py — Hyperparameter ablation study with calibration evaluation
 # =============================================================================
-# Run in Colab:
-#   !pip install netcal --quiet
-#   !python main.py
+# Experiment: How does FT-Transformer calibration change under different
+# architectural configurations?
 #
-# Or from a notebook:
-#   from main import run_calibration, run_active_learning_experiment, run_all
+# Ablation design: vary ONE hyperparameter at a time, others fixed to defaults.
+#   d_model  ∈ {32, 64, 128}   — model capacity
+#   n_layers ∈ {1, 2, 4}       — depth
+#   dropout  ∈ {0.1, 0.2, 0.3} — regularisation + MC uncertainty
 #
-# To switch dataset: change config.DATASET before running.
+# For each config, three UQ methods are evaluated:
+#   1. Standard inference   — baseline, typically overconfident
+#   2. MC Dropout           — 30 stochastic passes [GAL16]
+#   3. Temperature Scaling  — single-parameter post-hoc fix [GUO17]
+#
+# Key metric: ECE (Expected Calibration Error) — lower is better.
 # =============================================================================
 
 import torch
 import numpy as np
+import os
 import config
 
-from data           import get_dataset, preprocess, make_ood, get_loaders
-from models         import TabTransformer
-from training       import train
-from evaluation     import (compute_all,
-                             predict_standard,
-                             predict_mc_dropout,
-                             TemperatureScaler,
-                             predict_temperature_scaled)
-from active_learning import run_all_strategies
-from visualization  import (plot_reliability_diagrams,
-                             plot_ece_comparison,
-                             plot_entropy_ood,
-                             plot_results_table,
-                             plot_training_curves,
-                             plot_learning_curves)
+from data        import get_dataset, preprocess, make_ood, get_loaders
+from models      import FTTransformer
+from training    import train
+from evaluation  import (compute_all,
+                          predict_standard,
+                          predict_mc_dropout,
+                          TemperatureScaler,
+                          predict_temperature_scaled)
+from visualization import (plot_reliability_diagrams,
+                            plot_ece_comparison,
+                            plot_entropy_ood,
+                            plot_results_table,
+                            plot_training_curves,
+                            plot_sweep_results,
+                            plot_attention_heatmap)
 
 torch.manual_seed(config.RANDOM_SEED)
 np.random.seed(config.RANDOM_SEED)
 
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+os.makedirs(config.FIGURES_DIR, exist_ok=True)
 
-# ── Experiment A: Calibration ─────────────────────────────────────────────────
 
-def run_calibration(X_train, y_train, X_val, y_val, X_test, y_test, X_ood,
-                    n_features, n_classes, dataset_name):
+# ── Single-config evaluation ──────────────────────────────────────────────────
+
+def evaluate_config(model, loaders):
     """
-    Train a Transformer and evaluate three calibration methods:
-    Standard baseline, MC Dropout, and Temperature Scaling.
-    Generates figures 1–5.
+    Run all three UQ methods on a trained model and return metrics dict.
+
+    Returns:
+        results : {
+            'std': {'probs', 'labels', 'metrics'},
+            'mc':  {'probs', 'labels', 'metrics', 'unc_test', 'unc_ood'},
+            'ts':  {'probs', 'labels', 'metrics', 'T'},
+        }
     """
-    print("\n" + "="*60)
-    print("EXPERIMENT A: Calibration & Uncertainty")
-    print("="*60)
+    # Standard
+    probs_std, labels = predict_standard(model, loaders["test"])
 
-    loaders = get_loaders(X_train, y_train, X_val, y_val, X_test, y_test, X_ood)
+    # MC Dropout
+    probs_mc,  _, unc_test = predict_mc_dropout(model, loaders["test"])
+    _,         _, unc_ood  = predict_mc_dropout(model, loaders["ood"])
 
-    # Train
-    model = TabTransformer(n_features=n_features, n_classes=n_classes)
-    print(f"Parameters: {model.count_parameters():,}")
-    history = train(model, loaders)
-
-    # Inference — Standard
-    probs_std, labels_test = predict_standard(model, loaders["test"])
-
-    # Inference — MC Dropout
-    probs_mc, _, uncertainty_test = predict_mc_dropout(model, loaders["test"])
-    _,        _, uncertainty_ood  = predict_mc_dropout(model, loaders["ood"])
-
-    # Inference — Temperature Scaling
-    print("\n── Fitting Temperature Scaling ──")
-    ts = TemperatureScaler(model)
-    T_value = ts.fit(loaders["val"])
+    # Temperature Scaling — move to DEVICE to avoid device mismatch
+    ts = TemperatureScaler(model).to(DEVICE)
+    T  = ts.fit(loaders["val"])
     probs_ts, _ = predict_temperature_scaled(ts, loaders["test"])
 
-    # Metrics
-    results = {
-        "std": {"probs": probs_std, "labels": labels_test, "metrics": compute_all(probs_std, labels_test)},
-        "mc":  {"probs": probs_mc,  "labels": labels_test, "metrics": compute_all(probs_mc,  labels_test)},
-        "ts":  {"probs": probs_ts,  "labels": labels_test, "metrics": compute_all(probs_ts,  labels_test)},
+    return {
+        "std": {
+            "probs":   probs_std,
+            "labels":  labels,
+            "metrics": compute_all(probs_std, labels),
+        },
+        "mc": {
+            "probs":    probs_mc,
+            "labels":   labels,
+            "metrics":  compute_all(probs_mc, labels),
+            "unc_test": unc_test,
+            "unc_ood":  unc_ood,
+        },
+        "ts": {
+            "probs":   probs_ts,
+            "labels":  labels,
+            "metrics": compute_all(probs_ts, labels),
+            "T":       T,
+        },
     }
 
-    _print_calibration_table(results, T_value)
 
-    # Figures
-    print(f"\n── Generating calibration figures → {config.FIGURES_DIR}/ ──")
+# ── Hyperparameter ablation sweep ─────────────────────────────────────────────
+
+def run_sweep(loaders, n_features, n_classes):
+    """
+    Ablation study: vary d_model / n_layers / dropout one at a time.
+
+    For each config:
+        train FT-Transformer → evaluate Standard / MC Dropout / Temp Scaling
+
+    Returns:
+        sweep_results : list of dicts, each containing:
+            {label, cfg, results, history}
+    """
+    base = {
+        "d_model":  config.D_MODEL,
+        "n_layers": config.N_LAYERS,
+        "dropout":  config.DROPOUT,
+    }
+
+    sweep_results = []
+    seen = set()   # avoid re-running identical configs
+
+    for param_name, values in config.SWEEP.items():
+        for val in values:
+            cfg = {**base, param_name: val}
+            key = (cfg["d_model"], cfg["n_layers"], cfg["dropout"])
+            if key in seen:
+                continue
+            seen.add(key)
+
+            label = f"{param_name}={val}"
+            print(f"\n{'='*60}")
+            print(f"  Config: {cfg}  [{label}]")
+            print(f"{'='*60}")
+
+            model = FTTransformer(
+                n_features=n_features,
+                n_classes=n_classes,
+                d_model=cfg["d_model"],
+                nhead=4,               # 4 divides 32, 64, 128 equally
+                num_layers=cfg["n_layers"],
+                dropout=cfg["dropout"],
+            )
+            print(f"  Parameters: {model.count_parameters():,}")
+
+            history = train(model, loaders, epochs=config.SWEEP_EPOCHS)
+            results = evaluate_config(model, loaders)
+
+            _print_config_table(label, results)
+
+            sweep_results.append({
+                "label":   label,
+                "cfg":     cfg,
+                "results": results,
+                "history": history,
+                "model":   model,
+            })
+
+    return sweep_results
+
+
+# ── Base config — full figures ─────────────────────────────────────────────────
+
+def run_base_config(loaders, n_features, n_classes, dataset_name, feature_names):
+    """
+    Train the DEFAULT config (d_model=64, n_layers=2, dropout=0.2) at full
+    epochs and generate all poster figures for that single config.
+    """
+    print(f"\n{'='*60}")
+    print("  BASE CONFIG — full training + all figures")
+    print(f"{'='*60}")
+
+    model = FTTransformer(n_features=n_features, n_classes=n_classes)
+    print(f"  Parameters: {model.count_parameters():,}")
+
+    history = train(model, loaders)
+    results = evaluate_config(model, loaders)
+    T_value = results["ts"]["T"]
+
+    _print_config_table("Base config", results)
+
+    # ── Poster figures ────────────────────────────────────────────────────────
+    print(f"\n── Generating figures → {config.FIGURES_DIR}/ ──")
+
     plot_training_curves(history)
     plot_reliability_diagrams(results)
     plot_ece_comparison(results)
-    plot_entropy_ood(uncertainty_test, uncertainty_ood)
+    plot_entropy_ood(
+        results["mc"]["unc_test"],
+        results["mc"]["unc_ood"]
+    )
     plot_results_table(results, dataset_name, T_value)
 
+    # Attention heatmap — implicit feature selection
+    sample_x = next(iter(loaders["test"]))[0][:256].to(DEVICE)
+    attn = model.get_attention_weights(sample_x)
+    plot_attention_heatmap(attn, feature_names)
+
     return results, model
-
-
-# ── Experiment B: Active Learning ─────────────────────────────────────────────
-
-def run_active_learning_experiment(X_train, y_train, X_test, y_test, n_classes):
-    """
-    Compare three acquisition strategies on the same dataset:
-      - Random  (baseline)
-      - Entropy (max predictive entropy, MC Dropout)
-      - BALD    (epistemic uncertainty only)
-
-    Paper connection [GAL17]:
-        'We show that BALD and entropy-based acquisition consistently
-         outperform random baselines across datasets.'
-
-    Generates figure 6 (learning curves).
-    """
-    print("\n" + "="*60)
-    print("EXPERIMENT B: Active Learning")
-    print("="*60)
-    print(f"  Initial seed  : {config.AL_INITIAL_SIZE} samples")
-    print(f"  Query budget  : {config.AL_QUERY_SIZE} per round")
-    print(f"  Rounds        : {config.AL_N_ROUNDS}")
-    print(f"  Epochs/round  : {config.AL_EPOCHS_PER_ROUND}")
-
-    al_results = run_all_strategies(
-        X_train, y_train,
-        X_test,  y_test,
-        n_classes=n_classes
-    )
-
-    # Print summary
-    print(f"\n{'Strategy':<12} {'Final Acc':>10} {'Labeled':>10}")
-    print("-" * 35)
-    for strategy, data in al_results.items():
-        print(f"{strategy:<12} {data['accuracies'][-1]:>10.4f} "
-              f"{data['labeled_counts'][-1]:>10}")
-
-    # Figure
-    print(f"\n── Generating active learning figure → {config.FIGURES_DIR}/ ──")
-    plot_learning_curves(al_results)
-
-    return al_results
 
 
 # ── Full pipeline ─────────────────────────────────────────────────────────────
 
 def run_all():
-    """Run both experiments end-to-end."""
+    """Load data, run base config figures, then run hyperparameter sweep."""
 
     # ── Data ─────────────────────────────────────────────────────────────────
     X, y, n_classes, dataset_name, feature_names = get_dataset()
-    (X_train, y_train), (X_val, y_val), (X_test, y_test), scaler = preprocess(X, y)
-    X_ood = make_ood(X_test)
+    (X_train, y_train), (X_val, y_val), (X_test, y_test), _ = preprocess(X, y)
+    X_ood   = make_ood(X_test)
+    loaders = get_loaders(X_train, y_train, X_val, y_val, X_test, y_test, X_ood)
     n_features = X_train.shape[1]
 
-    print(f"\nDataset   : {dataset_name}")
-    print(f"Features  : {n_features}  |  Classes: {n_classes}")
+    print(f"\nDataset  : {dataset_name}")
+    print(f"Features : {n_features}  |  Classes: {n_classes}")
+    print(f"Device   : {DEVICE}")
 
-    # ── Experiment A: Calibration ─────────────────────────────────────────────
-    cal_results, model = run_calibration(
-        X_train, y_train, X_val, y_val, X_test, y_test, X_ood,
-        n_features, n_classes, dataset_name
+    # ── Base config ───────────────────────────────────────────────────────────
+    base_results, base_model = run_base_config(
+        loaders, n_features, n_classes, dataset_name, feature_names
     )
 
-    # ── Experiment B: Active Learning ─────────────────────────────────────────
-    al_results = run_active_learning_experiment(
-        X_train, y_train, X_test, y_test, n_classes
-    )
+    # ── Ablation sweep ────────────────────────────────────────────────────────
+    print(f"\n{'='*60}")
+    print("  HYPERPARAMETER ABLATION SWEEP")
+    print(f"{'='*60}")
 
-    print("\n✓ All experiments complete. Figures saved to figures/")
-    return cal_results, al_results
+    sweep_results = run_sweep(loaders, n_features, n_classes)
+    plot_sweep_results(sweep_results)
+
+    print("\n✓ All experiments complete.")
+    print(f"✓ Figures saved to {config.FIGURES_DIR}/")
+
+    return base_results, sweep_results
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Helper ────────────────────────────────────────────────────────────────────
 
-def _print_calibration_table(results, T_value):
-    print(f"\n{'='*62}")
-    print(f"{'CALIBRATION RESULTS':^62}")
-    print(f"{'='*62}")
-    print(f"{'Method':<28} {'Accuracy':>9} {'ECE':>9} {'NLL':>9}")
-    print(f"{'-'*62}")
-    for key, label in [("std", "Standard (Baseline)"),
-                        ("mc",  f"MC Dropout (T={config.MC_SAMPLES})"),
-                        ("ts",  "Temperature Scaling")]:
+def _print_config_table(label, results):
+    print(f"\n  {'─'*52}")
+    print(f"  Results for: {label}")
+    print(f"  {'─'*52}")
+    print(f"  {'Method':<26} {'Accuracy':>9} {'ECE':>9} {'NLL':>9}")
+    print(f"  {'─'*52}")
+    for key, name in [("std", "Standard (Baseline)"),
+                      ("mc",  f"MC Dropout (T={config.MC_SAMPLES})"),
+                      ("ts",  "Temperature Scaling")]:
         m = results[key]["metrics"]
-        print(f"{label:<28} {m['accuracy']:>9.4f} {m['ece']:>9.4f} {m['nll']:>9.4f}")
-    print(f"{'='*62}")
-    print(f"Learned temperature T = {T_value:.4f}")
+        print(f"  {name:<26} {m['accuracy']:>9.4f} {m['ece']:>9.4f} {m['nll']:>9.4f}")
+    if "T" in results["ts"]:
+        print(f"  Learned T = {results['ts']['T']:.4f}")
+    print(f"  {'─'*52}")
 
 
 if __name__ == "__main__":
