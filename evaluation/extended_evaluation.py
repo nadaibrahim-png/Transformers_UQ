@@ -466,8 +466,8 @@ def run_per_class_calibration(model, test_loader, ts_model, ir_scaler,
 # Master runner
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_all_extended(model, train_loader, val_loader, test_loader,
-                     figure_dir=None):
+def run_all_extended(model, val_loader, test_loader,
+                     train_loader=None, figure_dir=None):
     """
     Run all five extended experiments in sequence.
 
