@@ -102,22 +102,97 @@ def compute_brier_score(probs, labels):
 
 
 def compute_accuracy(probs, labels):
-    """Top-1 accuracy."""
+    """Top-1 accuracy. Biased toward majority class — use balanced_accuracy instead."""
     return float((probs.argmax(axis=1) == labels).mean())
+
+
+def compute_balanced_accuracy(probs, labels):
+    """
+    Balanced accuracy — average per-class recall, unaffected by class imbalance.
+
+    Balanced Acc = (1/C) Σ_c  TP_c / (TP_c + FN_c)
+                 = mean of per-class recall scores
+
+    For MiniBooNE (72% νμ / 28% νₑ):
+        A model always predicting νμ → accuracy 0.72, balanced accuracy 0.50.
+        Random chance → balanced accuracy 0.50 regardless of class ratio.
+        This is the headline metric for imbalanced datasets.
+
+    Args:
+        probs  : (n_samples, n_classes) softmax probabilities
+        labels : (n_samples,) true class indices
+
+    Returns:
+        balanced_acc : scalar float in [0, 1]
+    """
+    predictions = probs.argmax(axis=1)
+    classes     = np.unique(labels)
+    per_class_recall = []
+    for c in classes:
+        mask = labels == c
+        if mask.sum() == 0:
+            continue
+        recall = (predictions[mask] == c).mean()
+        per_class_recall.append(float(recall))
+    return float(np.mean(per_class_recall))
+
+
+def compute_per_class_recall(probs, labels, class_names=None):
+    """
+    Per-class recall (sensitivity) for each class.
+
+    For MiniBooNE:
+        Class 0 (νμ background) recall = background rejection rate
+        Class 1 (νₑ signal)     recall = signal efficiency
+
+    Signal efficiency is the primary physics metric — it answers:
+    'Of all the real νₑ events, how many does the model correctly flag?'
+
+    Args:
+        probs       : (n_samples, n_classes) softmax probabilities
+        labels      : (n_samples,) true class indices
+        class_names : optional list of names, e.g. ["νμ Bkg", "νₑ Sig"]
+
+    Returns:
+        recall_dict : dict mapping class name (or index) → recall float
+    """
+    predictions = probs.argmax(axis=1)
+    classes     = np.unique(labels)
+    recall_dict = {}
+    for c in classes:
+        mask = labels == c
+        recall = float((predictions[mask] == c).mean()) if mask.sum() > 0 else 0.0
+        key = class_names[int(c)] if class_names else int(c)
+        recall_dict[key] = recall
+    return recall_dict
 
 
 def compute_all(probs, labels):
     """
-    Compute all calibration metrics at once.
+    Compute all calibration and classification metrics.
+
+    Primary metric is balanced_accuracy (not accuracy) to account for
+    MiniBooNE's 72/28 class imbalance.
 
     Returns:
-        dict with keys: 'accuracy', 'ece', 'nll', 'brier'
+        dict with keys:
+            'balanced_accuracy' — headline metric (class-fair)
+            'accuracy'          — plain accuracy (for comparison with literature)
+            'signal_recall'     — νₑ recall / signal efficiency
+            'background_recall' — νμ recall / background rejection
+            'ece'               — Expected Calibration Error
+            'nll'               — Negative Log-Likelihood
+            'brier'             — Brier Score
     """
+    recall = compute_per_class_recall(probs, labels)
     return {
-        "accuracy": compute_accuracy(probs, labels),
-        "ece":      compute_ece(probs, labels),
-        "nll":      compute_nll(probs, labels),
-        "brier":    compute_brier_score(probs, labels),
+        "balanced_accuracy": compute_balanced_accuracy(probs, labels),
+        "accuracy":          compute_accuracy(probs, labels),
+        "signal_recall":     recall.get(1, recall.get(0, 0.0)),   # class 1 = νₑ
+        "background_recall": recall.get(0, 0.0),                   # class 0 = νμ
+        "ece":               compute_ece(probs, labels),
+        "nll":               compute_nll(probs, labels),
+        "brier":             compute_brier_score(probs, labels),
     }
 
 

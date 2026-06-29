@@ -176,38 +176,38 @@ def plot_noise_sweep(sigmas, results, save_path=None):
 
 def run_full_metrics(model, val_loader, test_loader, ts_model, ir_scaler):
     """
-    Compute ECE, NLL, and Brier Score for all four UQ methods on the
-    clean test set.
+    Compute all metrics for all four UQ methods on the clean test set.
+
+    Headline metric is balanced_accuracy (not plain accuracy) to account
+    for MiniBooNE's 72/28 class imbalance.
 
     Returns:
-        table : dict[method_name] → dict with 'accuracy','ece','nll','brier'
+        table : dict[method_name] → dict with all metrics from compute_all()
     """
     print("Computing full metric table...")
     table = {}
 
-    # Standard
     p, y = predict_standard(model, test_loader)
     table["Standard"] = compute_all(p, y)
 
-    # MC Dropout
     p_mc, y, _ = predict_mc_dropout(model, test_loader)
     table["MC Dropout"] = compute_all(p_mc, y)
 
-    # Temperature Scaling
     p_ts, y = predict_temperature_scaled(ts_model, test_loader)
     table["Temp. Scaling"] = compute_all(p_ts, y)
 
-    # Isotonic Regression
     p_raw, y = predict_standard(model, test_loader)
     p_ir = ir_scaler.predict(p_raw)
     table["Isotonic"] = compute_all(p_ir, y)
 
-    # Print table
-    print(f"\n{'Method':<20} {'Accuracy':>10} {'ECE':>10} {'NLL':>10} {'Brier':>10}")
-    print("-" * 55)
+    # Print — balanced accuracy as headline
+    hdr = f"\n{'Method':<20} {'Bal.Acc':>9} {'Acc':>7} {'νₑ Recall':>11} {'νμ Recall':>11} {'ECE':>8} {'NLL':>8} {'Brier':>8}"
+    print(hdr)
+    print("-" * len(hdr))
     for name, m in table.items():
-        print(f"{name:<20} {m['accuracy']:>10.4f} {m['ece']:>10.4f} "
-              f"{m['nll']:>10.4f} {m['brier']:>10.4f}")
+        print(f"{name:<20} {m['balanced_accuracy']:>9.4f} {m['accuracy']:>7.4f} "
+              f"{m['signal_recall']:>11.4f} {m['background_recall']:>11.4f} "
+              f"{m['ece']:>8.4f} {m['nll']:>8.4f} {m['brier']:>8.4f}")
 
     return table
 
