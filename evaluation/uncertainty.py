@@ -1,10 +1,11 @@
 # =============================================================================
 # evaluation/uncertainty.py — UQ inference methods
 # =============================================================================
-# Three methods:
-#   1. Standard      — single forward pass, dropout OFF   [baseline]
-#   2. MC Dropout    — 30 stochastic forward passes       [GAL16]
-#   3. Temperature Scaling — post-hoc logit rescaling     [GUO17]
+# Four methods:
+#   1. Standard          — single forward pass, dropout OFF   [baseline]
+#   2. MC Dropout        — 30 stochastic forward passes       [GAL16]
+#   3. Temperature Scaling — post-hoc logit rescaling         [GUO17]
+#   4. Isotonic Regression — non-parametric post-hoc scaling  [ZADROZNY02]
 
 import numpy as np
 import torch
@@ -177,3 +178,104 @@ def predict_temperature_scaled(ts_model, loader):
             all_labels.append(y_batch.numpy())
 
     return np.vstack(all_probs), np.concatenate(all_labels)
+
+
+# ── Method 4: Isotonic Regression ────────────────────────────────────────────
+
+class IsotonicScaler:
+    """
+    Non-parametric post-hoc calibration via Isotonic Regression.
+
+    Paper connection [ZADROZNY02]:
+        Fits a monotonic step function mapping raw confidence → calibrated
+        probability on the VALIDATION set. No distributional assumption
+        (unlike Temperature Scaling which assumes logit shift).
+
+    Tradeoff vs Temperature Scaling:
+        + More flexible — can correct any monotonic miscalibration pattern.
+        − Needs more val data to avoid overfitting the calibration map.
+        − One IR fitted per class (one-vs-rest), then outputs renormalised.
+
+    For MiniBooNE (binary): fits 2 isotonic regressors on [p(νₑ), p(νμ)],
+    each independently mapped, then softmax-normalised.
+
+    Paper: Zadrozny & Elkan 2002 — "Transforming Classifier Scores into
+           Accurate Multiclass Probability Estimates" (KDD 2002).
+    """
+
+    def __init__(self):
+        from sklearn.isotonic import IsotonicRegression
+        self._IsotonicRegression = IsotonicRegression
+        self.regressors = None   # list of fitted IR, one per class
+        self.n_classes  = None
+
+    def fit(self, val_probs, val_labels):
+        """
+        Fit one isotonic regressor per class on validation probabilities.
+
+        Args:
+            val_probs  : (n_val, n_classes) softmax probabilities from model
+            val_labels : (n_val,) true class indices
+        """
+        self.n_classes  = val_probs.shape[1]
+        self.regressors = []
+
+        for c in range(self.n_classes):
+            y_binary = (val_labels == c).astype(float)   # 1 if true class = c
+            ir = self._IsotonicRegression(out_of_bounds="clip")
+            ir.fit(val_probs[:, c], y_binary)
+            self.regressors.append(ir)
+
+        print(f"  Isotonic Regression fitted on {len(val_labels)} val samples "
+              f"({self.n_classes} regressors)")
+
+    def predict(self, probs):
+        """
+        Apply fitted isotonic regressors and renormalise to sum to 1.
+
+        Args:
+            probs : (n_samples, n_classes) raw softmax probabilities
+
+        Returns:
+            calibrated_probs : (n_samples, n_classes)
+        """
+        if self.regressors is None:
+            raise RuntimeError("Call fit() before predict().")
+
+        calibrated = np.column_stack([
+            self.regressors[c].predict(probs[:, c])
+            for c in range(self.n_classes)
+        ])
+
+        # Renormalise — IR outputs are not guaranteed to sum to 1
+        row_sums = calibrated.sum(axis=1, keepdims=True)
+        row_sums = np.where(row_sums == 0, 1.0, row_sums)   # avoid div-by-zero
+        return calibrated / row_sums
+
+
+def predict_isotonic(model, val_loader, test_loader):
+    """
+    Fit Isotonic Regression on validation set and evaluate on test set.
+
+    Args:
+        model       : trained FTTransformer (eval mode)
+        val_loader  : DataLoader for validation set (used to fit IR)
+        test_loader : DataLoader for test set (evaluated after calibration)
+
+    Returns:
+        probs_cal : (n_test, n_classes) isotonic-calibrated probabilities
+        labels    : (n_test,) true class labels
+        scaler    : fitted IsotonicScaler (for reuse on OOD sets)
+    """
+    # 1. Get raw validation probabilities to fit the regressor
+    val_probs, val_labels = predict_standard(model, val_loader)
+
+    # 2. Fit isotonic regressor
+    scaler = IsotonicScaler()
+    scaler.fit(val_probs, val_labels)
+
+    # 3. Get raw test probabilities and apply calibration
+    test_probs, test_labels = predict_standard(model, test_loader)
+    probs_cal = scaler.predict(test_probs)
+
+    return probs_cal, test_labels, scaler

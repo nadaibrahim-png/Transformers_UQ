@@ -4,6 +4,7 @@
 # Paper connections:
 #   ECE + Reliability diagrams : Guo et al. 2017 (arXiv:1706.04599)
 #   NLL                        : standard probabilistic metric
+#   Brier Score                : Brier 1950; Murphy 1973
 
 import numpy as np
 import sys, os
@@ -72,6 +73,34 @@ def compute_nll(probs, labels):
     return float(-np.mean(np.log(true_probs + 1e-9)))
 
 
+def compute_brier_score(probs, labels):
+    """
+    Brier Score — mean squared error between predicted probabilities and one-hot labels.
+
+    BS = (1/n) Σ Σ_c (p(c|xᵢ) − 1[yᵢ=c])²
+
+    Range [0, 2] for multi-class (normalised to [0, 1] for binary).
+    Lower is better. A perfect model scores 0; random guessing scores ~0.5.
+
+    Unlike ECE (binning-based), Brier Score is a proper scoring rule that
+    penalises both overconfidence AND underconfidence continuously.
+
+    Paper connection: Brier (1950); Murphy (1973).
+
+    Args:
+        probs  : (n_samples, n_classes) softmax probabilities
+        labels : (n_samples,) true class indices
+
+    Returns:
+        brier : scalar float
+    """
+    n, n_classes = probs.shape
+    # Build one-hot targets
+    y_onehot = np.zeros_like(probs)
+    y_onehot[np.arange(n), labels] = 1.0
+    return float(np.mean(np.sum((probs - y_onehot) ** 2, axis=1)))
+
+
 def compute_accuracy(probs, labels):
     """Top-1 accuracy."""
     return float((probs.argmax(axis=1) == labels).mean())
@@ -79,16 +108,41 @@ def compute_accuracy(probs, labels):
 
 def compute_all(probs, labels):
     """
-    Compute all three calibration metrics at once.
+    Compute all calibration metrics at once.
 
     Returns:
-        dict with keys: 'accuracy', 'ece', 'nll'
+        dict with keys: 'accuracy', 'ece', 'nll', 'brier'
     """
     return {
         "accuracy": compute_accuracy(probs, labels),
         "ece":      compute_ece(probs, labels),
         "nll":      compute_nll(probs, labels),
+        "brier":    compute_brier_score(probs, labels),
     }
+
+
+def compute_ece_per_class(probs, labels, n_bins=None):
+    """
+    Per-class ECE — compute ECE separately for each true class.
+
+    Answers: 'Is the model better calibrated for signal (νₑ) than background (νμ)?'
+    Critical for rare-event physics where signal purity matters more than
+    raw accuracy.
+
+    Args:
+        probs  : (n_samples, n_classes) softmax probabilities
+        labels : (n_samples,) true class indices
+
+    Returns:
+        per_class_ece : dict mapping class_index → ECE float
+    """
+    n_bins = n_bins or config.N_BINS
+    classes = np.unique(labels)
+    per_class_ece = {}
+    for c in classes:
+        mask = labels == c
+        per_class_ece[int(c)] = compute_ece(probs[mask], labels[mask], n_bins)
+    return per_class_ece
 
 
 def get_reliability_data(probs, labels, n_bins=None):
