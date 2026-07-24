@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+venv/
+.venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Office temp files
+~$*.pptx
+~$*.docx
+~$*.xlsx
+
+# Old poster versions (keep only final)
+ICTP_Poster_2026.pptx
+ICTP_Poster_2026_v4.pptx
+ICTP_Poster_2026_v5.pptx
+ICTP_Poster_2026_v6.pptx
+ICTP_Poster_2026_v7.pptx
+ICTP_Poster_2026_v8.pptx
+ICTP_Poster_2026_v8_final.pptx
+ICTP_Poster_2026_v9.pptx
+
+# Old/draft reports
+Technical_Report.docx
+Technical_Report_Complete.docx
+Technical_Report_Results.docx
+
+# Raw figure downloads (kept in repo root as originals)
+download*.png
+
+# Unpacked poster working directory
+poster_v9_unpacked/
+
+# Model weights (too large for git — use Drive)
+*.pt
+*.pth
+ensemble_weights/
