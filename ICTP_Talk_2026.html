@@ -141,27 +141,23 @@ canvas { border-radius: 8px; }
     <span class="timer">0:30 &ndash; 1:30</span>
   </div>
   <div class="slide-body">
-    <div class="two-col">
-      <div class="half">
-        <span class="section-tag">What goes wrong</span>
-        <p class="txt">Modern deep learning models are <strong>accurate but overconfident</strong>. A model that outputs "95% confident" should be correct 95% of the time. In practice, it often isn't.</p>
-        <p class="txt" style="margin-top:8px">This matters more in physics than in most domains. A miscalibrated classifier used in a neutrino oscillation analysis can <strong>systematically bias signal selection</strong>, inflating or suppressing discovery significance.</p>
-        <div class="eq" style="margin-top:10px">Overconfidence: P(correct | conf=0.95) &lt;&lt; 0.95</div>
-        <div class="eq">Ideal:          P(correct | conf=p) = p  &forall;p</div>
+    <p class="txt" style="margin-bottom:10px">Modern deep learning models are <strong>accurate but overconfident</strong>. P(correct | conf=0.95) &lt;&lt; 0.95 in practice. In physics, miscalibrated classifiers can <strong>bias signal selection</strong> and distort discovery significance.</p>
+    <div class="card-grid g2" style="flex:1;gap:10px">
+      <div class="card" style="background:#FEF2F2;border-top:4px solid var(--red)">
+        <h4 style="color:var(--red);font-size:13px">&#10006; The Problem</h4>
+        <p style="font-size:12px;margin-top:5px">Softmax classifiers are systematically overconfident. Confidence does not equal correctness. Without UQ, the model gives no signal when it is operating outside its training distribution.</p>
       </div>
-      <div class="half">
-        <span class="section-tag">Two distinct questions</span>
-        <div style="display:grid;gap:9px;margin-top:4px">
-          <div class="card" style="background:#FEF9E7;border-top:3px solid var(--amber)">
-            <h4 style="color:var(--amber)">Calibration</h4>
-            <p>Are confidence scores numerically reliable? ECE measures the gap. Post-hoc fixes (TS, Isotonic) improve the numbers but add no new information.</p>
-          </div>
-          <div class="card" style="background:#EFF6FF;border-top:3px solid var(--blue)">
-            <h4 style="color:var(--blue)">Epistemic UQ &larr; our focus</h4>
-            <p>Does the model <em>know</em> it doesn't know? Captures genuine model uncertainty &mdash; detects OOD, quantifies knowledge gaps, decomposable into aleatoric + epistemic.</p>
-          </div>
-        </div>
-        <div class="warn" style="margin-top:10px">Post-hoc calibration adjusts numbers after the fact.<br>Epistemic UQ models the uncertainty itself.</div>
+      <div class="card" style="background:#FEF9E7;border-top:4px solid var(--amber)">
+        <h4 style="color:var(--amber);font-size:13px">&#9651; Calibration (post-hoc)</h4>
+        <p style="font-size:12px;margin-top:5px"><strong>Temperature Scaling</strong> rescales logits by a learned scalar T to align confidence with accuracy. Cheap and effective &mdash; but only adjusts numbers; it does not model or reduce the underlying uncertainty.</p>
+      </div>
+      <div class="card" style="background:#EFF6FF;border-top:4px solid var(--blue)">
+        <h4 style="color:var(--blue);font-size:13px">&#10024; Epistemic UQ &larr; our focus</h4>
+        <p style="font-size:12px;margin-top:5px">Does the model <em>know</em> what it doesn&rsquo;t know? Epistemic methods estimate <em>parameter uncertainty</em> &mdash; they detect OOD inputs, quantify knowledge gaps, and decompose uncertainty into its sources.</p>
+      </div>
+      <div class="card" style="background:#F0FFF4;border-top:4px solid var(--green)">
+        <h4 style="color:var(--green);font-size:13px">&#9989; Our approach</h4>
+        <p style="font-size:12px;margin-top:5px">We apply <strong>3 epistemic UQ methods</strong> (MC Dropout, Deep Ensembles, SWAG) on a FT-Transformer trained on MiniBooNE, plus Temperature Scaling as a post-hoc calibration baseline.</p>
       </div>
     </div>
   </div>
@@ -305,6 +301,9 @@ canvas { border-radius: 8px; }
     <span class="timer">5:30 &ndash; 6:30</span>
   </div>
   <div class="slide-body">
+    <div class="warn" style="margin-bottom:10px;font-size:12px;padding:7px 14px">
+      <strong>Methodology:</strong> We apply 3 epistemic UQ methods &mdash; MC Dropout, Deep Ensembles, and SWAG &mdash; each targeting the <em>reducible</em> component of uncertainty. Temperature Scaling is included as a post-hoc calibration baseline.
+    </div>
     <div class="two-col">
       <div class="half">
         <div class="card" style="background:#EFF6FF;border-top:3px solid var(--blue);margin-bottom:10px">
@@ -689,7 +688,7 @@ Aleatoric  H[p&#772;] &minus; MI</div>
         </tr>
       </tbody>
     </table>
-    <div class="success" style="margin-top:14px">All three epistemic methods improve calibration AND provide OOD detection &mdash; something post-hoc calibration methods (TS, Isotonic) fundamentally cannot do.</div>
+    <div class="success" style="margin-top:14px">All three epistemic methods improve calibration AND provide OOD detection &mdash; something Temperature Scaling alone fundamentally cannot do.</div>
   </div>
 </div>
 
